@@ -48,6 +48,57 @@ require_cmd() {
 require_cmd git
 require_cmd docker
 
+trace_syslinux_candidates() {
+  local root="$1"
+  local phase="$2"
+  local -a candidates=()
+
+  while IFS= read -r -d '' cfg; do
+    candidates+=("$cfg")
+  done < <(find "$root" -type f -name "syslinux.cfg" -print0 2>/dev/null || true)
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    echo "[$phase] No syslinux.cfg files found under: $root"
+    return 0
+  fi
+
+  for cfg in "${candidates[@]}"; do
+    if grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' "$cfg"; then
+      echo "[$phase] $cfg still references whichsys.c32"
+    else
+      echo "[$phase] $cfg is clean (no whichsys.c32)"
+    fi
+  done
+}
+
+apply_syslinux_overlay() {
+  local root="$1"
+  local overlay_cfg="$2"
+  local phase="$3"
+  local -a candidates=()
+  local replaced=0
+
+  while IFS= read -r -d '' cfg; do
+    candidates+=("$cfg")
+  done < <(find "$root" -type f -name "syslinux.cfg" -print0 2>/dev/null || true)
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    echo "[$phase] No syslinux.cfg candidates found under: $root"
+    return 0
+  fi
+
+  for cfg in "${candidates[@]}"; do
+    # Always replace canonical profile path; also replace any file that still references whichsys.c32.
+    if [[ "$cfg" == */syslinux/syslinux.cfg ]] || grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' "$cfg"; then
+      cp -f "$overlay_cfg" "$cfg"
+      replaced=$((replaced + 1))
+    fi
+  done
+
+  echo "[$phase] Applied boot overlay to $replaced syslinux.cfg file(s) under: $root"
+  trace_syslinux_candidates "$root" "$phase"
+}
+
 DOCKER_CMD=(docker)
 if ! docker info >/dev/null 2>&1; then
   if command -v sudo >/dev/null 2>&1; then
@@ -144,9 +195,7 @@ rm -f \
 
 # Apply boot overlay so every clone of the ISO repo gets our supported legacy syslinux.cfg (no whichsys.c32).
 # This is built into the produced ISO by mkarchiso. Required for validation and for any clone of this repo.
-if [[ -f "$ISO_DIR/syslinux/syslinux.cfg" ]]; then
-  cp -f "$BOOT_OVERLAY_DIR/syslinux/syslinux.cfg" "$ISO_DIR/syslinux/syslinux.cfg"
-fi
+apply_syslinux_overlay "$ISO_DIR" "$BOOT_OVERLAY_DIR/syslinux/syslinux.cfg" "host-prebuild"
 
 "${DOCKER_CMD[@]}" build -t "$IMAGE_NAME" - <<'DOCKERFILE'
 FROM archlinux:latest
@@ -181,6 +230,31 @@ rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR"
 cp /tmp/krdp-working-fixes.patch "$PKG_DIR/"
 
+KRDP_SRC_DIR=/tmp/krdp-src
+rm -rf "$KRDP_SRC_DIR"
+
+krdp_repo_urls=(
+  "https://invent.kde.org/plasma/krdp.git"
+  "https://github.com/KDE/krdp.git"
+)
+
+krdp_clone_ok=0
+for repo in "${krdp_repo_urls[@]}"; do
+  echo "[krdp-source] Attempting clone from: $repo"
+  if git clone --depth 1 "$repo" "$KRDP_SRC_DIR"; then
+    krdp_clone_ok=1
+    echo "[krdp-source] Using source remote: $repo"
+    break
+  fi
+done
+
+if [[ "$krdp_clone_ok" -ne 1 ]]; then
+  echo "[krdp-source] Failed to clone KRDP from all configured remotes" >&2
+  exit 1
+fi
+
+tar -C /tmp -czf "$PKG_DIR/krdp-src.tar.gz" krdp-src
+
 cat > "$PKG_DIR/PKGBUILD" <<'"'"'EOF'"'"'
 pkgname=krdp
 pkgver=0
@@ -192,26 +266,30 @@ url="https://kde.org/plasma-desktop/"
 license=(LGPL-2.0-or-later)
 depends=(freerdp gcc-libs glibc kcmutils kconfig kcoreaddons kcrash kguiaddons ki18n kpipewire kstatusnotifieritem libxkbcommon pam qt6-base qtkeychain-qt6 systemd-libs wayland)
 makedepends=(extra-cmake-modules git plasma-wayland-protocols qt6-wayland)
-source=("krdp::git+https://invent.kde.org/plasma/krdp.git" "krdp-working-fixes.patch")
+source=("krdp-src.tar.gz" "krdp-working-fixes.patch")
 sha256sums=("SKIP" "SKIP")
 
 pkgver() {
-  cd krdp
+  cd krdp-src
   local base
   base="$(sed -n '\''s/^set(PROJECT_VERSION \"\\(.*\\)\")/\\1/p'\'' CMakeLists.txt | head -n1)"
   if [[ -z "$base" ]]; then
     base="0"
   fi
-  printf "%s.r%s.g%s" "$base" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf "%s.r%s.g%s" "$base" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  else
+    printf "%s.r0.glocal" "$base"
+  fi
 }
 
 prepare() {
-  cd krdp
+  cd krdp-src
   patch -Np1 -i "${srcdir}/krdp-working-fixes.patch"
 }
 
 build() {
-  cmake -B build -S krdp -DBUILD_TESTING=OFF
+  cmake -B build -S krdp-src -DBUILD_TESTING=OFF
   cmake --build build
 }
 
@@ -353,13 +431,74 @@ fi
 
 pacman-conf --config /build/pacman.conf >/dev/null
 
+# Refresh package metadata once here so package fallback checks are reliable.
+pacman --config /build/pacman.conf -Sy --noconfirm >/dev/null
+
+# EndeavourOS package rename compatibility:
+# if eos-settings-plasma is no longer published, switch all references to eos-settings-kde.
+if grep -R -q --exclude-dir=.git --exclude-dir=work --exclude-dir=out -- "eos-settings-plasma" /build; then
+  if ! pacman --config /build/pacman.conf -Si eos-settings-plasma >/dev/null 2>&1; then
+    if pacman --config /build/pacman.conf -Si eos-settings-kde >/dev/null 2>&1; then
+      while IFS= read -r file; do
+        sed -i "s/eos-settings-plasma/eos-settings-kde/g" "$file"
+        echo "[container-pre-prepare] Rewrote package reference in: $file"
+      done < <(grep -R -I -l --exclude-dir=.git --exclude-dir=work --exclude-dir=out -- "eos-settings-plasma" /build)
+    else
+      echo "[container-pre-prepare] Neither eos-settings-plasma nor eos-settings-kde is available in configured repos" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Fix ownership for bind-mounted working tree so non-root prepare hooks can write safely.
+chown -R builder:builder /build
+
+# prepare.sh invokes makepkg; run as non-root.
 su - builder -c "cd /build && ./prepare.sh"
 
-# Apply boot overlay after prepare.sh so mkarchiso sees our syslinux.cfg (prepare.sh must not overwrite it)
-cp -f /boot-overlay/syslinux/syslinux.cfg /build/syslinux/syslinux.cfg
+apply_overlay_in_build() {
+  local phase="$1"
+  local -a candidates=()
+  local replaced=0
+
+  while IFS= read -r cfg; do
+    candidates+=("$cfg")
+  done < <(find /build -type f -name "syslinux.cfg" 2>/dev/null || true)
+
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    echo "[$phase] No syslinux.cfg candidates found under /build"
+    return 0
+  fi
+
+  for cfg in "${candidates[@]}"; do
+    if [[ "$cfg" == */syslinux/syslinux.cfg ]] || grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' "$cfg"; then
+      cp -f /boot-overlay/syslinux/syslinux.cfg "$cfg"
+      replaced=$((replaced + 1))
+    fi
+  done
+
+  echo "[$phase] Applied overlay to $replaced syslinux.cfg file(s)"
+  for cfg in "${candidates[@]}"; do
+    if grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' "$cfg"; then
+      echo "[$phase] $cfg still references whichsys.c32"
+    else
+      echo "[$phase] $cfg is clean (no whichsys.c32)"
+    fi
+  done
+}
+
+# Apply boot overlay after prepare.sh so mkarchiso sees our syslinux.cfg.
+apply_overlay_in_build "container-post-prepare"
 
 rm -rf /build/work /build/out
-su - builder -c "cd /build && sudo ./mkarchiso -v ."
+cd /build && ./mkarchiso -v .
+
+if grep -R --include="syslinux.cfg" -nE '^[[:space:]]*[^#].*whichsys\.c32' /build/work >/tmp/whichsys-work-hits 2>/dev/null; then
+  echo "[container-post-mkarchiso] whichsys.c32 still present in work tree:"
+  cat /tmp/whichsys-work-hits
+else
+  echo "[container-post-mkarchiso] no whichsys.c32 matches found in /build/work syslinux.cfg files"
+fi
 '
 
 latest_iso="$(ls -1t "$ISO_DIR"/out/*.iso 2>/dev/null | head -n1 || true)"
@@ -373,8 +512,11 @@ if [[ -n "$latest_iso" ]]; then
     exit 1
   fi
   iso_syslinux_cfg="$(bsdtar -xOf "$latest_iso" boot/syslinux/syslinux.cfg 2>/dev/null || true)"
-  if [[ "$iso_syslinux_cfg" == *"whichsys.c32"* ]]; then
+  if grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' <<< "$iso_syslinux_cfg"; then
     echo "ISO validation failed: boot/syslinux/syslinux.cfg still references whichsys.c32" >&2
+    echo "Extracted boot/syslinux/syslinux.cfg from ISO (first 20 lines):" >&2
+    printf "%s\n" "$iso_syslinux_cfg" | sed -n "1,20p" >&2
+    trace_syslinux_candidates "$ISO_DIR" "host-post-build"
     exit 1
   fi
   echo "ISO build complete: $latest_iso"
