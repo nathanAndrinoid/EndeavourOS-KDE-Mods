@@ -63,8 +63,9 @@ To only build and cache the patched KRDP and custom Calamares packages (no ISO):
 | `build-endeavouros-krdp-iso.sh` | Build entrypoint: clones EndeavourOS-ISO and Calamares, applies overlay and patch, runs mkarchiso. |
 | `patches/krdp-working-fixes.patch` | KRDP source patch applied when building the krdp package. |
 | `calamares-overlay/` | Custom Calamares data overlaid on upstream: `data/eos/scripts/` (e.g. `cleaner_script.sh`, `ssh_setup_script.sh`), `data/eos/modules/eos_script_ssh_setup.conf`, and `data/eos/settings_online.conf` / `settings_offline.conf`. |
+| `boot-overlay/syslinux/syslinux.cfg` | Legacy (BIOS) Syslinux entry used when the cloned profile still references `whichsys.c32`; a supported ISO-only config so the build passes validation without reimplementing boot logic. |
 
-The script creates (and `.gitignore` excludes) `endeavouros-iso-build/` (EndeavourOS-ISO clone) and `build-src/deps/endeavouros-calamares/` (Calamares clone + overlay). Do not remove or ignore `patches/` or `calamares-overlay/` if you want to keep the customizations.
+The script creates (and `.gitignore` excludes) `endeavouros-iso-build/` (EndeavourOS-ISO clone) and `build-src/deps/endeavouros-calamares/` (Calamares clone + overlay). Do not remove or ignore `patches/`, `calamares-overlay/`, or `boot-overlay/` if you want to keep the customizations.
 
 ---
 

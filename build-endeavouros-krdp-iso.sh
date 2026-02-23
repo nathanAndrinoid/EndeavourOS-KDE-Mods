@@ -6,6 +6,7 @@ ISO_DIR="${SCRIPT_DIR}/endeavouros-iso-build"
 PATCH_FILE="${SCRIPT_DIR}/patches/krdp-working-fixes.patch"
 CALAMARES_SRC_DIR="${SCRIPT_DIR}/build-src/deps/endeavouros-calamares"
 CALAMARES_OVERLAY_DIR="${SCRIPT_DIR}/calamares-overlay"
+BOOT_OVERLAY_DIR="${SCRIPT_DIR}/boot-overlay"
 IMAGE_NAME="eos-krdp-iso-builder"
 SKIP_ISO_BUILD=0
 
@@ -76,6 +77,10 @@ fi
   echo "Missing Calamares overlay: $CALAMARES_OVERLAY_DIR/data/eos/scripts/ssh_setup_script.sh" >&2
   exit 1
 }
+[[ -d "$BOOT_OVERLAY_DIR" ]] && [[ -f "$BOOT_OVERLAY_DIR/syslinux/syslinux.cfg" ]] || {
+  echo "Missing boot overlay: $BOOT_OVERLAY_DIR/syslinux/syslinux.cfg (required for legacy boot; must be in repo)" >&2
+  exit 1
+}
 rsync -a "$CALAMARES_OVERLAY_DIR/" "$CALAMARES_SRC_DIR/"
 [[ -f "$CALAMARES_SRC_DIR/data/eos/scripts/ssh_setup_script.sh" ]] || {
   echo "Missing custom Calamares SSH setup script under: $CALAMARES_SRC_DIR" >&2
@@ -136,6 +141,12 @@ rm -f \
   "$ISO_DIR"/airootfs/root/packages/calamares-*.pkg.tar.zst \
   "$ISO_DIR"/airootfs/root/packages/calamares-debug-*.pkg.tar.zst \
   "$ISO_DIR"/airootfs/root/packages/ckbcomp-*.pkg.tar.zst
+
+# Apply boot overlay so every clone of the ISO repo gets our supported legacy syslinux.cfg (no whichsys.c32).
+# This is built into the produced ISO by mkarchiso. Required for validation and for any clone of this repo.
+if [[ -f "$ISO_DIR/syslinux/syslinux.cfg" ]]; then
+  cp -f "$BOOT_OVERLAY_DIR/syslinux/syslinux.cfg" "$ISO_DIR/syslinux/syslinux.cfg"
+fi
 
 "${DOCKER_CMD[@]}" build -t "$IMAGE_NAME" - <<'DOCKERFILE'
 FROM archlinux:latest
