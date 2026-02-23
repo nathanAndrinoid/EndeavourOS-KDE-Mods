@@ -325,6 +325,7 @@ fi
 
 "${DOCKER_CMD[@]}" run --rm --privileged \
   -v "$ISO_DIR:/build" \
+  -v "$BOOT_OVERLAY_DIR:/boot-overlay:ro" \
   -w /build \
   "$IMAGE_NAME" \
   bash -lc '
@@ -351,7 +352,12 @@ if grep -q "^\[endeavouros\]" /build/pacman.conf; then
 fi
 
 pacman-conf --config /build/pacman.conf >/dev/null
+
 su - builder -c "cd /build && ./prepare.sh"
+
+# Apply boot overlay after prepare.sh so mkarchiso sees our syslinux.cfg (prepare.sh must not overwrite it)
+cp -f /boot-overlay/syslinux/syslinux.cfg /build/syslinux/syslinux.cfg
+
 rm -rf /build/work /build/out
 su - builder -c "cd /build && sudo ./mkarchiso -v ."
 '
