@@ -1,5 +1,5 @@
 diff --git a/src/InputHandler.cpp b/src/InputHandler.cpp
-index e387e55..49f245c 100644
+index 108ea32..49f245c 100644
 --- a/src/InputHandler.cpp
 +++ b/src/InputHandler.cpp
 @@ -5,6 +5,8 @@
@@ -114,7 +114,7 @@ index e387e55..49f245c 100644
  
  BOOL inputSynchronizeEvent(rdpInput *input, uint32_t flags)
  {
-@@ -37,6 +122,17 @@ BOOL inputMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
+@@ -37,6 +135,17 @@ BOOL inputMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
      return FALSE;
  }
  
@@ -132,15 +132,17 @@ index e387e55..49f245c 100644
  BOOL inputExtendedMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
  {
      auto context = reinterpret_cast<PeerContext *>(input->context);
-@@ -75,6 +171,7 @@ class KRDP_NO_EXPORT InputHandler::Private
+@@ -73,6 +183,8 @@ class KRDP_NO_EXPORT InputHandler::Private
+ {
  public:
      RdpConnection *session;
      rdpInput *input;
++    QPointF lastMousePosition{0, 0};
 +    QPointF relativePointerPos{0, 0};
  };
  
  InputHandler::InputHandler(KRdp::RdpConnection *session)
-@@ -93,6 +190,7 @@ void InputHandler::initialize(rdpInput *input)
+@@ -94,6 +204,7 @@ void InputHandler::initialize(rdpInput *input)
      d->input = input;
      input->SynchronizeEvent = inputSynchronizeEvent;
      input->MouseEvent = inputMouseEvent;
@@ -148,7 +150,7 @@ index e387e55..49f245c 100644
      input->ExtendedMouseEvent = inputExtendedMouseEvent;
      input->KeyboardEvent = inputKeyboardEvent;
      input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
-@@ -100,12 +198,19 @@ void InputHandler::initialize(rdpInput *input)
+@@ -101,12 +212,19 @@ void InputHandler::initialize(rdpInput *input)
  
  bool InputHandler::synchronizeEvent(uint32_t /*flags*/)
  {
@@ -167,8 +169,8 @@ index e387e55..49f245c 100644
 +
      QPointF position = QPointF(x, y);
  
-     Qt::MouseButton button = Qt::NoButton;
-@@ -151,6 +256,10 @@ bool InputHandler::mouseEvent(uint16_t x, uint16_t y, uint16_t flags)
+     // Track last known mouse position for wheel events from clients
+@@ -152,6 +270,10 @@ bool InputHandler::mouseEvent(uint16_t x, uint16_t y, uint16_t flags)
  
  bool InputHandler::extendedMouseEvent(uint16_t x, uint16_t y, uint16_t flags)
  {
@@ -179,7 +181,7 @@ index e387e55..49f245c 100644
      if (flags & PTR_FLAGS_MOVE) {
          return mouseEvent(x, y, PTR_FLAGS_MOVE);
      }
-@@ -176,8 +285,76 @@ bool InputHandler::extendedMouseEvent(uint16_t x, uint16_t y, uint16_t flags)
+@@ -177,8 +299,76 @@ bool InputHandler::extendedMouseEvent(uint16_t x, uint16_t y, uint16_t flags)
      return true;
  }
  
@@ -256,7 +258,7 @@ index e387e55..49f245c 100644
      auto virtualCode = GetVirtualKeyCodeFromVirtualScanCode(flags & KBD_FLAGS_EXTENDED ? code | KBDEXT : code, 4);
      virtualCode = flags & KBD_FLAGS_EXTENDED ? virtualCode | KBDEXT : virtualCode;
  
-@@ -193,6 +369,10 @@ bool InputHandler::keyboardEvent(uint16_t code, uint16_t flags)
+@@ -194,6 +384,10 @@ bool InputHandler::keyboardEvent(uint16_t code, uint16_t flags)
  
  bool InputHandler::unicodeKeyboardEvent(uint16_t code, uint16_t flags)
  {
@@ -318,7 +320,7 @@ index 1b11424..e9161e0 100644
      connect(d->request, &ScreencastingStream::created, this, [this](uint nodeId) {
          qCDebug(KRDP) << "Started Plasma session";
 diff --git a/src/PortalSession.cpp b/src/PortalSession.cpp
-index 374d052..6a1c505 100644
+index d6a1c50..6a1c505 100644
 --- a/src/PortalSession.cpp
 +++ b/src/PortalSession.cpp
 @@ -8,6 +8,7 @@
@@ -409,13 +411,17 @@ index 374d052..6a1c505 100644
      QDBusConnection::sessionBus().asyncCall(closeMessage);
  
      qCDebug(KRDP) << "Closing Freedesktop Portal Session";
-@@ -186,12 +237,74 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
+@@ -184,13 +238,75 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
      }
      case QEvent::Wheel: {
          auto we = std::static_pointer_cast<QWheelEvent>(event);
 -        auto delta = we->angleDelta();
 -        if (delta.y() != 0) {
 -            d->remoteInterface->NotifyPointerAxisDiscrete(d->sessionPath, QVariantMap{}, 0 /* Vertical */, delta.y() / 120);
+-        }
+-        if (delta.x() != 0) {
+-            d->remoteInterface->NotifyPointerAxisDiscrete(d->sessionPath, QVariantMap{}, 1 /* Horizontal */, delta.x() / 120);
+-        }
 +        const auto delta = we->angleDelta();
 +        const auto pixelDelta = we->pixelDelta();
 +        const auto position = we->position();
@@ -442,9 +448,7 @@ index 374d052..6a1c505 100644
 +            dx = static_cast<double>(delta.x());
 +            dy = static_cast<double>(delta.y());
 +            sendSmoothAxis = true;
-         }
--        if (delta.x() != 0) {
--            d->remoteInterface->NotifyPointerAxisDiscrete(d->sessionPath, QVariantMap{}, 1 /* Horizontal */, delta.x() / 120);
++        }
 +        const bool likelyTouchpad = sendSmoothAxis
 +            && qFuzzyIsNull(position.x())
 +            && qFuzzyIsNull(position.y())
@@ -486,9 +490,10 @@ index 374d052..6a1c505 100644
 +                d->remoteInterface->NotifyPointerAxisDiscrete(d->sessionPath, QVariantMap{}, 1 /* Horizontal */, horizontalSteps);
 +                d->pendingDiscreteWheelX -= horizontalSteps * 120;
 +            }
-         }
++        }
          break;
      }
+     case QEvent::KeyPress:
 diff --git a/src/RdpConnection.cpp b/src/RdpConnection.cpp
 index 775aa84..2cda49e 100644
 --- a/src/RdpConnection.cpp
@@ -620,8 +625,8 @@ index 775aa84..2cda49e 100644
      d->peer->PostConnect = peerPostConnect;
  
      d->peer->context->update->SuppressOutput = suppressOutput;
-@@ -503,41 +579,101 @@ bool RdpConnection::onActivate()
-     return true;
+@@ -503,38 +579,101 @@ bool RdpConnection::onActivate()
+    return true;
  }
  
 -bool RdpConnection::onPostConnect()
@@ -637,16 +642,14 @@ index 775aa84..2cda49e 100644
 +        const QString domain = authIdentityString(identity->Domain, identity->DomainLength);
 +        password = authIdentityString(identity->Password, identity->PasswordLength);
 +        username = domain.isEmpty() ? user : QStringLiteral("%1\\%2").arg(domain, user);
- 
--    if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
--        return false;
++
 +        qCDebug(KRDP) << "Logon callback user:" << username << "automatic:" << (automatic == TRUE) << "passwordLength:" << password.size();
 +    } else {
 +        qCWarning(KRDP) << "Logon callback did not provide an identity";
      }
  
--    const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username));
--    const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
+-    if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
+-        return false;
 +    // Some clients do not provide credentials here and only send them later.
 +    // Defer to PostConnect in that case.
 +    if (username.isEmpty() && password.isEmpty()) {
@@ -783,4 +786,3 @@ index ee1675d..4e612d9 100644
 +
          return first.version < second.version;
      });
- 

@@ -3,7 +3,7 @@
 This repo builds a **custom EndeavourOS ISO** based on the official image, with KDE on Wayland, a patched KRDP stack for RDP, and installer-driven setup for OpenSSH and GitHub SSH keys.
 
 ---
- 
+
 ## What’s different in this ISO
 
 Compared to a stock EndeavourOS ISO, this build applies the following changes.
