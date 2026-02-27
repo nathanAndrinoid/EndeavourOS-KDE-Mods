@@ -8,6 +8,8 @@ ISO_DIR="${SCRIPT_DIR}/endeavouros-iso-build"
 # cannot traverse /home/<user>/ (mode 700) to reach a nested cache dir.
 # Override via env:  PKG_CACHE_DIR=/other/path ./build-endeavouros-krdp-iso.sh
 PKG_CACHE_DIR="${PKG_CACHE_DIR:-/var/cache/eos-krdp-build}"
+WORK_DIR="$PKG_CACHE_DIR/work"
+OUT_DIR="$PKG_CACHE_DIR/out"
 KRDP_SRC_DIR="${SCRIPT_DIR}/build-src/deps/krdp"
 CALAMARES_SRC_DIR="${SCRIPT_DIR}/build-src/deps/endeavouros-calamares"
 SKIP_ISO_BUILD=0
@@ -51,6 +53,7 @@ require_cmd git
 require_cmd makepkg
 require_cmd sudo
 require_cmd bsdtar
+require_cmd mkarchiso
 
 if [[ $EUID -eq 0 ]]; then
   echo "Run as a regular user (not root). This script uses sudo where needed." >&2
@@ -131,8 +134,8 @@ MKPKG_CONF="$BUILD_TMP/makepkg.conf"
 cp /etc/makepkg.conf "$MKPKG_CONF"
 # PACMAN_OPTS+= appends to any flags already accumulated by arg parsing
 # (e.g. --noconfirm), preserving them while adding --cachedir.
-printf '\nPACMAN_OPTS+=(--cachedir "%s/pacman")\nSRCDEST="%s/sources"\n' \
-  "$PKG_CACHE_DIR" "$PKG_CACHE_DIR" >> "$MKPKG_CONF"
+printf '\nPACMAN_OPTS+=(--cachedir "%s/pacman")\nSRCDEST="%s/sources"\nMAKEFLAGS="-j%s"\n' \
+  "$PKG_CACHE_DIR" "$PKG_CACHE_DIR" "$(nproc)" >> "$MKPKG_CONF"
 
 # ---------------------------------------------------------------------------
 # KRDP
@@ -178,7 +181,7 @@ build() {
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=/usr/lib \
     -DBUILD_TESTING=OFF
-  cmake --build build
+  cmake --build build --parallel $(nproc)
 }
 
 package() {
@@ -271,7 +274,7 @@ build() {
     finishedq initcpio keyboardq license localeq notesqml oemid \
     openrcdmcryptcfg plymouthcfg plasmalnf services-openrc \
     summaryq tracking welcomeq"
-  cmake --build build
+  cmake --build build --parallel $(nproc)
 }
 
 package() {
@@ -332,11 +335,54 @@ if grep -R -q --exclude-dir=.git --exclude-dir=work --exclude-dir=out -- "eos-se
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Pre-flight ISO profile validation
+# Catch missing runtime boot dependencies before the long mkarchiso run.
+# ---------------------------------------------------------------------------
+echo "[preflight] Validating ISO profile requirements..."
+preflight_errors=0
+
+# syslinux must be in the package list; pacstrap installs it into the airootfs
+# and mkarchiso copies /usr/lib/syslinux/bios/*.c32 (including ldlinux.c32)
+# into boot/syslinux/ of the ISO image.
+if ! grep -qxF 'syslinux' "$ISO_DIR/packages.x86_64"; then
+  echo "[preflight] FAIL: 'syslinux' is not in $ISO_DIR/packages.x86_64" \
+       "(provides ldlinux.c32, isolinux.bin, menu.c32, etc.)" >&2
+  preflight_errors=$((preflight_errors + 1))
+fi
+
+# The profile syslinux/ directory must exist and contain .cfg files so
+# mkarchiso can assemble the boot menu.
+if [[ ! -d "$ISO_DIR/syslinux" ]]; then
+  echo "[preflight] FAIL: syslinux profile directory missing: $ISO_DIR/syslinux" >&2
+  preflight_errors=$((preflight_errors + 1))
+else
+  cfg_count=$(find "$ISO_DIR/syslinux" -maxdepth 1 -name '*.cfg' | wc -l)
+  if [[ "$cfg_count" -eq 0 ]]; then
+    echo "[preflight] FAIL: no .cfg files found in $ISO_DIR/syslinux/" >&2
+    preflight_errors=$((preflight_errors + 1))
+  fi
+fi
+
+# profiledef.sh must declare bios.syslinux as a bootmode, otherwise mkarchiso
+# will never assemble the syslinux boot directory at all.
+if ! grep -qE "bios\.syslinux" "$ISO_DIR/profiledef.sh"; then
+  echo "[preflight] FAIL: 'bios.syslinux' bootmode not declared in $ISO_DIR/profiledef.sh" >&2
+  preflight_errors=$((preflight_errors + 1))
+fi
+
+if [[ $preflight_errors -gt 0 ]]; then
+  echo "[preflight] $preflight_errors pre-flight failure(s). Aborting before mkarchiso." >&2
+  exit 1
+fi
+echo "[preflight] ISO profile requirements OK"
+
 echo "[iso-build] Running prepare.sh..."
 (cd "$ISO_DIR" && ./prepare.sh)
 
 echo "[iso-build] Running mkarchiso (sudo required)..."
-sudo rm -rf "$ISO_DIR/work" "$ISO_DIR/out"
+sudo rm -rf "$WORK_DIR" "$OUT_DIR"
+sudo mkdir -p "$WORK_DIR" "$OUT_DIR"
 
 # Give mkarchiso a pacman.conf that points pacstrap at our cache.
 # mkarchiso's _make_pacman_conf() picks up the CacheDir and passes it to
@@ -345,15 +391,15 @@ ISO_PACMAN_CONF="$BUILD_TMP/iso-pacman.conf"
 sed "/^\[options\]/a CacheDir = $PKG_CACHE_DIR/pacman" \
   "$ISO_DIR/pacman.conf" > "$ISO_PACMAN_CONF"
 
-(cd "$ISO_DIR" && sudo ./mkarchiso -v -C "$ISO_PACMAN_CONF" .)
+(cd "$ISO_DIR" && sudo ./mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" -C "$ISO_PACMAN_CONF" .)
 
 # ---------------------------------------------------------------------------
 # Post-build validation (work tree is root-owned; use sudo for reads)
 # ---------------------------------------------------------------------------
-CALAMARES_ETC="$ISO_DIR/work/x86_64/airootfs/etc/calamares"
+CALAMARES_ETC="$WORK_DIR/x86_64/airootfs/etc/calamares"
 
 if sudo grep -R --include="syslinux.cfg" -nE '^[[:space:]]*[^#].*whichsys\.c32' \
-     "$ISO_DIR/work" >/tmp/whichsys-work-hits 2>/dev/null; then
+     "$WORK_DIR" >/tmp/whichsys-work-hits 2>/dev/null; then
   echo "[post-mkarchiso] whichsys.c32 still present in work tree:"
   cat /tmp/whichsys-work-hits
 else
@@ -392,26 +438,41 @@ echo "[post-mkarchiso] Calamares configuration validated successfully in work tr
 # ---------------------------------------------------------------------------
 # Final ISO validation
 # ---------------------------------------------------------------------------
-latest_iso="$(ls -1t "$ISO_DIR"/out/*.iso 2>/dev/null | head -n1 || true)"
+latest_iso="$(ls -1t "$OUT_DIR"/*.iso 2>/dev/null | head -n1 || true)"
 if [[ -n "$latest_iso" ]]; then
-  if ! bsdtar -tf "$latest_iso" | grep -qx "boot/syslinux/isolinux.bin"; then
-    echo "ISO validation failed: boot/syslinux/isolinux.bin is missing in $latest_iso" >&2
-    exit 1
-  fi
-  if ! bsdtar -tf "$latest_iso" | grep -qx "boot/syslinux/ldlinux.c32"; then
-    echo "ISO validation failed: boot/syslinux/ldlinux.c32 is missing in $latest_iso" >&2
-    exit 1
-  fi
+  iso_errors=0
+  iso_manifest="$(bsdtar -tf "$latest_iso" 2>/dev/null)"
+
+  for iso_file in \
+    "boot/syslinux/isolinux.bin" \
+    "boot/syslinux/ldlinux.c32" \
+    "boot/syslinux/menu.c32" \
+    "boot/syslinux/vesamenu.c32" \
+    "boot/syslinux/libcom32.c32" \
+    "boot/syslinux/libutil.c32" \
+    "boot/syslinux/isohdpfx.bin"
+  do
+    if ! grep -qx "$iso_file" <<< "$iso_manifest"; then
+      echo "ISO validation failed: $iso_file is missing in $latest_iso" >&2
+      iso_errors=$((iso_errors + 1))
+    fi
+  done
+
   iso_syslinux_cfg="$(bsdtar -xOf "$latest_iso" boot/syslinux/syslinux.cfg 2>/dev/null || true)"
   if grep -Eq '^[[:space:]]*[^#].*whichsys\.c32' <<< "$iso_syslinux_cfg"; then
     echo "ISO validation failed: boot/syslinux/syslinux.cfg still references whichsys.c32" >&2
     echo "Extracted boot/syslinux/syslinux.cfg from ISO (first 20 lines):" >&2
     printf "%s\n" "$iso_syslinux_cfg" | sed -n "1,20p" >&2
     trace_syslinux_candidates "$ISO_DIR" "host-post-build"
+    iso_errors=$((iso_errors + 1))
+  fi
+
+  if [[ $iso_errors -gt 0 ]]; then
+    echo "ISO validation: $iso_errors failure(s). The ISO at $latest_iso is incomplete." >&2
     exit 1
   fi
   echo "ISO build complete: $latest_iso"
 else
-  echo "ISO build finished but no ISO found under $ISO_DIR/out" >&2
+  echo "ISO build finished but no ISO found under $OUT_DIR" >&2
   exit 1
 fi

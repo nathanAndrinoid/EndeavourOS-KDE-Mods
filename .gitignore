@@ -11,6 +11,3 @@ build-src/calamares-cmake-build/
 # Hidden directories
 .claude/
 .cache/
-airootfs/
-efiboot/
-syslinux/
