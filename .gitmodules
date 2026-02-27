@@ -1,0 +1,12 @@
+[submodule "endeavouros-iso-build"]
+	path = endeavouros-iso-build
+	url = https://github.com/nathanAndrinoid/EndeavourOS-ISO.git
+	branch = eos-krdp-mods
+[submodule "build-src/deps/endeavouros-calamares"]
+	path = build-src/deps/endeavouros-calamares
+	url = https://github.com/nathanAndrinoid/EndeavourOS-calamares.git
+	branch = eos-krdp-mods
+[submodule "build-src/deps/krdp"]
+	path = build-src/deps/krdp
+	url = https://github.com/nathanAndrinoid/krdp.git
+	branch = eos-krdp-mods

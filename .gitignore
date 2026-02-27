@@ -1,0 +1,16 @@
+# Default cache is /var/cache/eos-krdp-build/ (outside the repo).
+# Ignore any local override placed inside the project directory.
+pkg-cache/
+local-stubs/
+*.log
+
+# Build output
+build/
+build-src/calamares-cmake-build/
+
+# Hidden directories
+.claude/
+.cache/
+airootfs/
+efiboot/
+syslinux/
