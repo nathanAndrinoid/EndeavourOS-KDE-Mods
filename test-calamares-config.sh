@@ -131,6 +131,105 @@ for dir in "${PLUGIN_QML_DIRS[@]}"; do
     done < <(find "$dir" -name "*.qml" -print0 2>/dev/null)
 done
 
+# ── 4. os-prober in the ISO package list ────────────────────────────────────
+#
+# Calamares calls runOsprober() during the partitioning phase to detect
+# dual-boot OSes (Windows, other Linux, etc.).  If os-prober is not installed
+# in the live session, Calamares logs:
+#   OsproberEntryList PartUtils::runOsprober … ERROR: os-prober cannot start.
+# and presents an empty "Other OS" list, breaking dual-boot detection.
+
+echo ""
+echo "=== Test 4: os-prober present in packages.x86_64 ==="
+
+PACKAGES_X86_64="endeavouros-iso-build/packages.x86_64"
+if grep -qxF 'os-prober' "$PACKAGES_X86_64"; then
+    _pass "packages.x86_64: os-prober present (Calamares dual-boot detection)"
+else
+    _fail "packages.x86_64: os-prober missing — Calamares cannot detect other OSes"
+fi
+
+# ── 5. services-systemd.conf correctness for KDE-only ISO ───────────────────
+#
+# Trying to enable display managers that are not installed produces
+# "Failed to enable unit: Unit gdm.service does not exist" warnings.
+# pacman-init.service is live-session-only and never present on an installed
+# system; trying to disable it produces a similar warning.
+# ModemManager must be enabled so NetworkManager doesn't log DBus errors.
+
+echo ""
+echo "=== Test 5: services-systemd.conf — KDE-only ISO correctness ==="
+
+SERVICES_CONF="$MODULES_DIR/services-systemd.conf"
+
+for dm in gdm lightdm lxdm ly greetd; do
+    if grep -q "${dm}\.service" "$SERVICES_CONF"; then
+        _fail "services-systemd.conf: ${dm}.service present — not installed in KDE ISO, causes enable warnings"
+    else
+        _pass "services-systemd.conf: ${dm}.service absent (correct for KDE-only ISO)"
+    fi
+done
+
+if grep -q "sddm\.service" "$SERVICES_CONF"; then
+    _pass "services-systemd.conf: sddm.service present (required for KDE)"
+else
+    _fail "services-systemd.conf: sddm.service missing"
+fi
+
+if grep -q "ModemManager\.service" "$SERVICES_CONF"; then
+    _pass "services-systemd.conf: ModemManager.service present (prevents NetworkManager DBus errors)"
+else
+    _fail "services-systemd.conf: ModemManager.service missing — NetworkManager logs activation failures"
+fi
+
+if grep -q "pacman-init" "$SERVICES_CONF"; then
+    _fail "services-systemd.conf: pacman-init listed — unit doesn't exist on installed system"
+else
+    _pass "services-systemd.conf: pacman-init absent (correct — live-session only)"
+fi
+
+# ── 6. RemoteConfig.h — setters must be Q_INVOKABLE ─────────────────────────
+#
+# eos_remote.qml calls setters as JavaScript functions, e.g.:
+#   onCheckedChanged: config.setEnableSshd(checked)
+# Q_PROPERTY WRITE only enables property-assignment syntax (config.foo = val).
+# Calling the setter as a function requires Q_INVOKABLE; without it QML logs:
+#   TypeError: Property 'setEnableSshd' of object RemoteConfig … is not a function
+
+echo ""
+echo "=== Test 6: RemoteConfig.h — setters are Q_INVOKABLE for QML method calls ==="
+
+REMOTE_CONFIG_H="$CALAMARES_SRC/src/modules/eos_remote/RemoteConfig.h"
+for setter in setEnableSshd setImportGithubKeys setGithubUsername setEnableRdp setRdpPassword; do
+    if grep -qE "Q_INVOKABLE[[:space:]]+void[[:space:]]+${setter}" "$REMOTE_CONFIG_H"; then
+        _pass "RemoteConfig.h: ${setter} is Q_INVOKABLE"
+    else
+        _fail "RemoteConfig.h: ${setter} missing Q_INVOKABLE — QML config.${setter}() calls will throw TypeError"
+    fi
+done
+
+# ── 7. mkinitcpio.conf.d drop-in for libseccomp ──────────────────────────────
+#
+# Without libseccomp.so in the initramfs, systemd-udevd logs on every boot:
+#   System call bpf cannot be resolved as libseccomp is not available
+# The drop-in in mkinitcpio.conf.d/ is included in the squashfs and used by
+# Calamares's initcpio module when regenerating the installed system's initramfs.
+
+echo ""
+echo "=== Test 7: mkinitcpio.conf.d — libseccomp drop-in for installed system ==="
+
+SECCOMP_DROPIN="endeavouros-iso-build/airootfs/etc/mkinitcpio.conf.d/99-eos-libseccomp.conf"
+if [ -f "$SECCOMP_DROPIN" ]; then
+    _pass "mkinitcpio.conf.d: 99-eos-libseccomp.conf exists"
+    if grep -qE "^BINARIES=.*libseccomp" "$SECCOMP_DROPIN"; then
+        _pass "mkinitcpio.conf.d: BINARIES includes libseccomp.so"
+    else
+        _fail "mkinitcpio.conf.d: libseccomp.so not found in BINARIES"
+    fi
+else
+    _fail "mkinitcpio.conf.d: 99-eos-libseccomp.conf missing — first-boot bpf syscall warning persists"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""

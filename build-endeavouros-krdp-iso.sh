@@ -119,7 +119,25 @@ rm -f \
 
 # Temporary build directory; cleaned automatically on exit.
 BUILD_TMP=$(mktemp -d /tmp/eos-krdp-build.XXXXXX)
-cleanup() { rm -rf "$BUILD_TMP"; }
+
+# ---------------------------------------------------------------------------
+# Sudo: authenticate once, disable passwd_timeout, keep token alive.
+# passwd_timeout=0 makes sudo wait indefinitely for a password if it ever
+# needs to re-prompt during the build (e.g. after a very long package step).
+# ---------------------------------------------------------------------------
+echo "[sudo] This build requires root access. Please enter your password:"
+sudo -v
+echo "Defaults:$(id -un) passwd_timeout=0" \
+  | sudo tee /etc/sudoers.d/99-eos-build-no-timeout > /dev/null
+# Refresh the token every 60 s so it never expires mid-build.
+( while true; do sleep 60; sudo -n -v 2>/dev/null || true; done ) &
+_SUDO_KEEPALIVE_PID=$!
+
+cleanup() {
+  kill "$_SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  sudo rm -f /etc/sudoers.d/99-eos-build-no-timeout 2>/dev/null || true
+  rm -rf "$BUILD_TMP"
+}
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -371,6 +389,14 @@ if ! grep -qxF 'syslinux' "$ISO_DIR/packages.x86_64"; then
   preflight_errors=$((preflight_errors + 1))
 fi
 
+# os-prober must be in the package list so Calamares can detect dual-boot OSes
+# during the live session partitioning phase.
+if ! grep -qxF 'os-prober' "$ISO_DIR/packages.x86_64"; then
+  echo "[preflight] FAIL: 'os-prober' is not in $ISO_DIR/packages.x86_64" \
+       "(Calamares PartUtils::runOsprober will silently fail)" >&2
+  preflight_errors=$((preflight_errors + 1))
+fi
+
 # The profile syslinux/ directory must exist and contain .cfg files so
 # mkarchiso can assemble the boot menu.
 if [[ ! -d "$ISO_DIR/syslinux" ]]; then
@@ -410,6 +436,12 @@ sudo mkdir -p "$WORK_DIR" "$OUT_DIR"
 ISO_PACMAN_CONF="$BUILD_TMP/iso-pacman.conf"
 sed "/^\[options\]/a CacheDir = $PKG_CACHE_DIR/pacman" \
   "$ISO_DIR/pacman.conf" > "$ISO_PACMAN_CONF"
+# eos-rankmirrors fires its hook when the package is installed during pacstrap.
+# The build chroot has no internet at that point, producing a red but harmless
+# error.  NoExtract prevents the hook file from landing on disk so it never
+# fires.  The eos-rankmirrors binary itself is still installed and callable.
+sed -i "/^\[options\]/a NoExtract = usr/share/libalpm/hooks/eos-rankmirrors.hook" \
+  "$ISO_PACMAN_CONF"
 
 # AIROOTFS_WORK_DIR tells run_before_squashfs.sh where the actual airootfs is;
 # sudo strips env vars by default so we inject it with 'env'.
@@ -446,7 +478,11 @@ sudo grep -q "GITHUB_USER\|ENABLE_SSHD\|ENABLE_RDP" "$CALAMARES_ETC/scripts/ssh_
   missing=$((missing + 1))
 }
 sudo grep -q "eos_remote" "$CALAMARES_ETC/settings_online.conf" 2>/dev/null || {
-  echo "[post-mkarchiso] Validation failed: settings_online.conf missing eos_remote Remote Access page" >&2
+  echo "[post-mkarchiso] Validation failed: settings_online.conf missing eos_remote Remote page" >&2
+  missing=$((missing + 1))
+}
+sudo grep -q "eos_remote" "$CALAMARES_ETC/settings_offline.conf" 2>/dev/null || {
+  echo "[post-mkarchiso] Validation failed: settings_offline.conf missing eos_remote Remote page" >&2
   missing=$((missing + 1))
 }
 
