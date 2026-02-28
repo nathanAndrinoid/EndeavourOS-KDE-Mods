@@ -13,19 +13,25 @@ OUT_DIR="$PKG_CACHE_DIR/out"
 KRDP_SRC_DIR="${SCRIPT_DIR}/build-src/deps/krdp"
 CALAMARES_SRC_DIR="${SCRIPT_DIR}/build-src/deps/endeavouros-calamares"
 SKIP_ISO_BUILD=0
+CLEAN_BUILD=0
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./build-endeavouros-krdp-iso.sh [--skip-iso-build]
+  ./build-endeavouros-krdp-iso.sh [--clean] [--skip-iso-build]
 
 Options:
+  --clean            Delete build cache directories ($PKG_CACHE_DIR) before building.
   --skip-iso-build   Build and cache patched KRDP + custom Calamares packages only.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --clean)
+      CLEAN_BUILD=1
+      shift
+      ;;
     --skip-iso-build)
       SKIP_ISO_BUILD=1
       shift
@@ -115,6 +121,14 @@ rm -f \
 BUILD_TMP=$(mktemp -d /tmp/eos-krdp-build.XXXXXX)
 cleanup() { rm -rf "$BUILD_TMP"; }
 trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Clean build cache
+# ---------------------------------------------------------------------------
+if [[ "$CLEAN_BUILD" -eq 1 ]]; then
+  echo "[clean] Removing build cache: $PKG_CACHE_DIR"
+  sudo rm -rf "$PKG_CACHE_DIR"
+fi
 
 # ---------------------------------------------------------------------------
 # Package cache
@@ -269,12 +283,18 @@ build() {
     -DCMAKE_INSTALL_LIBDIR=/usr/lib \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DINSTALL_CONFIG=OFF \
+    -DBUILD_TESTING=ON \
+    -DBUILD_SCHEMA_TESTING=ON \
     -DSKIP_MODULES="dracut \
     dummycpp dummyprocess dummypython dummypythonqt \
     finishedq initcpio keyboardq license localeq notesqml oemid \
     openrcdmcryptcfg plymouthcfg plasmalnf services-openrc \
     summaryq tracking welcomeq"
   cmake --build build --parallel $(nproc)
+  # Exclude tests that require hardware or system state not present in a
+  # container build environment (real disks, locale-gen, package DB, etc.).
+  ctest --test-dir build --output-on-failure \
+    -E "^(localetest|packagechoosertest|partitiondevicestest|partitionconfigtest)$"
 }
 
 package() {
@@ -391,7 +411,9 @@ ISO_PACMAN_CONF="$BUILD_TMP/iso-pacman.conf"
 sed "/^\[options\]/a CacheDir = $PKG_CACHE_DIR/pacman" \
   "$ISO_DIR/pacman.conf" > "$ISO_PACMAN_CONF"
 
-(cd "$ISO_DIR" && sudo ./mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" -C "$ISO_PACMAN_CONF" .)
+# AIROOTFS_WORK_DIR tells run_before_squashfs.sh where the actual airootfs is;
+# sudo strips env vars by default so we inject it with 'env'.
+(cd "$ISO_DIR" && sudo env AIROOTFS_WORK_DIR="$WORK_DIR" ./mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" -C "$ISO_PACMAN_CONF" .)
 
 # ---------------------------------------------------------------------------
 # Post-build validation (work tree is root-owned; use sudo for reads)
@@ -423,9 +445,8 @@ sudo grep -q "GITHUB_USER\|ENABLE_SSHD\|ENABLE_RDP" "$CALAMARES_ETC/scripts/ssh_
   echo "[post-mkarchiso] Validation failed: ssh_setup_script.sh missing expected remote-setup logic" >&2
   missing=$((missing + 1))
 }
-sudo grep -q "ENABLE_RDP\|_prompt_installer_remote_options" \
-     "$CALAMARES_ETC/scripts/cleaner_script.sh" 2>/dev/null || {
-  echo "[post-mkarchiso] Validation failed: cleaner_script.sh missing KRDP prompt logic" >&2
+sudo grep -q "eos_remote" "$CALAMARES_ETC/settings_online.conf" 2>/dev/null || {
+  echo "[post-mkarchiso] Validation failed: settings_online.conf missing eos_remote Remote Access page" >&2
   missing=$((missing + 1))
 }
 
